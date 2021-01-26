@@ -15,6 +15,100 @@
 
 #include "nvme-ioctl.h"
 
+#ifdef URING_PT
+
+#include <linux/io_uring.h>
+#include "liburing.h"
+
+#define QD	4
+
+int ring_init(struct io_uring *ring, struct io_uring_sqe **sqe)
+{
+	int ret = io_uring_queue_init(QD, ring, 0);
+	if (ret) {
+		fprintf(stderr, "ring setup failed: %d\n", ret);
+		return 1;
+	}
+	*sqe = io_uring_get_sqe(ring);
+	return 0;
+}
+
+int submit_sqe(struct io_uring *ring)
+{
+	int ret = io_uring_submit(ring);
+	if (ret <= 0) {
+		fprintf(stderr, "sqe submit failed, %d\n", ret);
+		return 1;
+	}
+	return 0;
+}
+
+int get_cqe(struct io_uring *ring, struct io_uring_cqe **cqe)
+{
+	int ret = io_uring_wait_cqe(ring, cqe);
+	if (ret < 0) {
+		fprintf(stderr, "wait completion failure, %d\n", ret);
+		return ret;
+	}
+	io_uring_cqe_seen(ring, *cqe);
+	return 0;
+}
+
+__s32 _uring_ioc(int fd, unsigned long ioctl_cmd, ...)
+{
+	struct io_uring ring;
+	struct io_uring_sqe *sqe = NULL;
+	struct io_uring_cqe *cqe = NULL;
+	int ret;
+	void *arg = NULL;
+	va_list ap;
+	__s32 result;
+
+	ret = ring_init(&ring, &sqe);
+	if (ret)
+		goto err;
+	sqe->ioctl_cmd = ioctl_cmd;
+	sqe->fd = fd;
+	sqe->opcode = IORING_OP_IOCTL_PT;
+
+	va_start(ap, ioctl_cmd);
+	arg = va_arg(ap, void *);
+	if (arg)
+		sqe->ioctl_arg = (__u64)arg;
+	va_end(ap);
+
+	ret = submit_sqe(&ring);
+	if (ret)
+		goto err;
+	ret = get_cqe(&ring, &cqe);
+	if (ret)
+		goto err;
+	result = cqe->res;
+
+	io_uring_queue_exit(&ring);
+	return result;
+err:
+	return 1;
+}
+
+__s32 uring_ioc(int fd, unsigned long cmd, ...)
+{
+	void *arg = NULL;
+	va_list ap;
+	__s32 result;
+
+	va_start(ap, cmd);
+	arg = va_arg(ap, void *);
+	if (arg)
+		result = _uring_ioc(fd, cmd, (__u64)arg);
+	else
+		result = _uring_ioc(fd, cmd);
+	va_end(ap);
+
+	return result;
+}
+#endif
+
 static int nvme_verify_chr(int fd)
 {
 	static struct stat nvme_stat;
